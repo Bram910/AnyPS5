@@ -55,6 +55,27 @@ def entries(build):
     return json.loads(result.stdout)
 
 
+def validate_arguments(arguments):
+    if not isinstance(arguments, list) or not arguments or any(not isinstance(argument, str) for argument in arguments) or not arguments[0]:
+        raise ValueError("arguments must be a nonempty list of strings with an executable")
+
+
+def validate_entries(database):
+    if not isinstance(database, list):
+        raise ValueError("compilation database must be an array")
+    for number, entry in enumerate(database, 1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"compilation database entry {number} must be an object")
+        for field in ("directory", "file"):
+            if not isinstance(entry.get(field), str) or not entry[field]:
+                raise ValueError(f"compilation database entry {number} requires a nonempty {field} string")
+        if "arguments" in entry:
+            validate_arguments(entry["arguments"])
+        elif not isinstance(entry.get("command"), str) or not entry["command"].strip():
+            raise ValueError(f"compilation database entry {number} requires a command string or arguments")
+    return database
+
+
 def entry_key(entry, root):
     directory = Path(entry["directory"]).resolve()
     source = Path(entry["file"])
@@ -69,7 +90,7 @@ def entry_key(entry, root):
 
 def index(build, root):
     commands = {}
-    for entry in entries(build):
+    for entry in validate_entries(entries(build)):
         commands.setdefault(entry_key(entry, root), []).append(entry)
     return commands
 
@@ -116,8 +137,7 @@ def syntax_only(entry, source):
 
 
 def syntax_arguments(arguments, directory, source):
-    if not isinstance(arguments, list) or not arguments or any(not isinstance(argument, str) for argument in arguments) or not arguments[0]:
-        raise ValueError("arguments must be a nonempty list of strings with an executable")
+    validate_arguments(arguments)
     for argument in arguments[1:]:
         if argument.startswith("@"):
             raise ValueError(f"unexpanded response file {argument[1:]}; provide expanded compile arguments before checking syntax")

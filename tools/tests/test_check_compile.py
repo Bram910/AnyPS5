@@ -16,6 +16,47 @@ TOOL = Path(__file__).resolve().parents[1] / "check_compile.py"
 
 
 class CheckCompileTests(unittest.TestCase):
+    def test_malformed_compilation_databases_report_errors_without_running_a_compiler(self):
+        source = self.source("unit.c")
+        marker = self.build / "compiler-ran"
+        script = self.compiler("from pathlib import Path\nPath(%r).touch()\n" % str(marker))
+        valid = self.entry("unit.c", f'"{sys.executable}" "{script}" "{source}"')
+        cases = [(value, "compilation database must be an array") for value in (None, False, 1, "commands", {})]
+        cases += [([valid, value], "compilation database entry 2 must be an object")
+                  for value in (None, False, 1, "command", [])]
+        for field in ("directory", "file"):
+            missing = {key: value for key, value in valid.items() if key != field}
+            cases.append(([valid, missing], f"entry 2 requires a nonempty {field} string"))
+            for value in (None, False, 1, [], {}, ""):
+                cases.append(([valid, dict(valid, **{field: value})], f"entry 2 requires a nonempty {field} string"))
+        for value in (None, False, 1, [], {}, "", "   "):
+            cases.append(([dict(valid, command=value)], "entry 1 requires a command string or arguments"))
+        cases.append(([{key: value for key, value in valid.items() if key != "command"}],
+                      "entry 1 requires a command string or arguments"))
+        for value in (None, False, 1, "gcc unit.c", [], [""], ["gcc", 1]):
+            cases.append(([valid, dict(valid, arguments=value)],
+                          "arguments must be a nonempty list of strings with an executable"))
+        for document, message in cases:
+            with self.subTest(document=document):
+                self.manifest(document)
+                result = self.tool("--jobs", "2", "unit.c")
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn(message, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertFalse(marker.exists())
+
+    def test_ninja_compilation_database_entries_are_validated(self):
+        for document, message in ((None, "compilation database must be an array"),
+                                  ([None], "compilation database entry 1 must be an object"),
+                                  ([{"directory": str(self.build)}], "entry 1 requires a nonempty file string")):
+            with self.subTest(document=document), \
+                    patch.object(check_compile.shutil, "which", return_value="ninja"), \
+                    patch.object(check_compile, "ninja_encoding", return_value="utf-8"), \
+                    patch.object(check_compile, "capture", return_value=subprocess.CompletedProcess([], 0, json.dumps(document), "")):
+                with self.assertRaisesRegex(ValueError, message):
+                    check_compile.index(self.build, self.root)
+
     def test_unexpanded_response_files_cannot_rewrite_build_outputs(self):
         compiler = shutil.which("clang")
         if compiler is None:

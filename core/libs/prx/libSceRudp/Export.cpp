@@ -38,7 +38,7 @@ constexpr std::size_t RUDP_STATUS_SIZE = 0xF8;
 constexpr std::size_t RUDP_STATUS_CURRENT_CONTEXTS = 0x64;
 constexpr uint16_t RUDP_MAX_SEGMENT_SIZE = 1410;
 
-using GuestRudpEventHandler = void(APS5_VABI*)(int, int, int, void*);
+using GuestRudpEventHandler = RudpEventHandler;
 
 std::mutex g_mutex;
 bool g_inited = false;

@@ -22,11 +22,14 @@ constexpr std::uint32_t Threads = 64;
 constexpr std::uint32_t Inputs = 4;
 constexpr std::uint32_t Results = 8;
 constexpr std::uint32_t Halves = 0x10000u;
-alignas(256) std::array<std::uint32_t, Threads * Inputs> Input{};
-alignas(256) std::array<std::uint32_t, Threads * Results> Output{};
+constexpr std::uint32_t PackedGroups = Halves / (Threads * 2u);
+constexpr std::uint32_t UnaryGroups = Halves / Threads;
+constexpr std::uint32_t Rows = UnaryGroups * Threads;
+std::vector<std::uint32_t> Input(Rows * Inputs);
+std::vector<std::uint32_t> Output(Rows * Results);
 
-alignas(256) constexpr std::array<std::uint32_t, 26> PackedCode{
-    0x34020084u, 0x34060085u, 0xe0381000u, 0x80000401u, 0xbf8c3f70u,
+alignas(256) constexpr std::array<std::uint32_t, 30> PackedCode{
+    0x34020084u, 0x34060085u, 0x8f098a08u, 0x8f0a8b08u, 0x4a020209u, 0x4a06060au, 0xe0381000u, 0x80000401u, 0xbf8c3f70u,
     0xcc0f400au, 0x18020b04u,
     0xcc10400bu, 0x18020b04u,
     0xcc0e400cu, 0x1c1a0b04u,
@@ -56,16 +59,16 @@ constexpr const char* UnaryNames[Results] = {
 };
 
 constexpr std::array<std::uint32_t, 34> MakeUnaryCode() {
-    std::array<std::uint32_t, 34> code{0x34020084u, 0x34060085u, 0xe0381000u, 0x80000401u, 0xbf8c3f70u};
+    std::array<std::uint32_t, 34> code{0x34020084u, 0x34060085u, 0x8f098a08u, 0x8f0a8b08u, 0x4a020209u, 0x4a06060au, 0xe0381000u, 0x80000401u, 0xbf8c3f70u};
     for (std::uint32_t index = 0; index < Results; ++index) {
-        code[5u + index] = 0x7e000280u | ((10u + index) << 17u) | (1u << 9u);
-        code[13u + index] = 0x7e000104u | ((10u + index) << 17u) | (UnaryOpcodes[index] << 9u);
+        code[9u + index] = 0x7e000280u | ((10u + index) << 17u) | (1u << 9u);
+        code[17u + index] = 0x7e000104u | ((10u + index) << 17u) | (UnaryOpcodes[index] << 9u);
     }
-    code[21u] = 0xe0781000u;
-    code[22u] = 0x80010a03u;
-    code[23u] = 0xe0781010u;
-    code[24u] = 0x80010e03u;
-    code[25u] = 0xbf810000u;
+    code[25u] = 0xe0781000u;
+    code[26u] = 0x80010a03u;
+    code[27u] = 0xe0781010u;
+    code[28u] = 0x80010e03u;
+    code[29u] = 0xbf810000u;
     return code;
 }
 
@@ -166,7 +169,7 @@ int main() {
         const auto output = BufferDescriptor(Output.data(), static_cast<std::uint32_t>(Output.size() * 4u));
         std::copy(input.begin(), input.end(), userData.begin());
         std::copy(output.begin(), output.end(), userData.begin() + 4);
-        const ShaderRecompiler::ShaderComputeStageInfo compute{{Threads, 1, 1}, 0u, {false, false, false}, false, 1};
+        const ShaderRecompiler::ShaderComputeStageInfo compute{{Threads, 1, 1}, 0u, {true, false, false}, false, 1};
         const auto compile = [&](std::span<const std::uint32_t> code, const ShaderRecompiler::SpirvTarget& shaderTarget, const Mode& mode) {
             const std::array<ShaderRecompiler::MemoryRegion, 1> memory{{{reinterpret_cast<std::uintptr_t>(code.data()), std::as_bytes(code)}}};
             ShaderRecompiler::RecompileRequest request{
@@ -179,20 +182,21 @@ int main() {
             request.context.floatMode = mode.floatMode;
             return ShaderRecompiler::Recompile(request);
         };
-        const auto run = [&](const auto& result, std::span<const std::uint32_t> code) {
-            Output.fill(0xdeadbeefu);
-            device->Dispatch(result, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(code.data()));
+        const auto run = [&](const auto& result, std::span<const std::uint32_t> code, std::uint32_t groups) {
+            std::ranges::fill(Output, 0xdeadbeefu);
+            device->Dispatch(result, groups, 1, 1, {}, reinterpret_cast<std::uintptr_t>(code.data()));
             device->WaitIdle();
             return Output;
         };
-        const auto compare = [&](const char* group, const Mode& mode, const char* const* names, const auto& fast, const auto& software) {
+        const auto compare = [&](const char* group, const Mode& mode, const char* const* names, const auto& fast, const auto& software, std::uint32_t rows) {
             std::uint64_t nanResults = 0u;
-            for (std::uint32_t tid = 0; tid < Threads; ++tid) {
+            for (std::uint32_t tid = 0; tid < rows; ++tid) {
                 const std::uint32_t* row = &Input[tid * Inputs];
+                if (std::ranges::all_of(std::span(&software[tid * Results], Results), [](std::uint32_t word) { return word == 0xdeadbeefu; })) Require(false, std::string("f16 unused NaN payloads: ") + group + ", " + mode.name + ", invocation " + std::to_string(tid) + " wrote no result");
                 for (std::uint32_t index = 0; index < Results; ++index) {
                     const std::uint32_t actual = fast[tid * Results + index];
                     const std::uint32_t expected = software[tid * Results + index];
-                    Require(actual == expected, std::string("f16 unused NaN payloads: ") + group + ", " + mode.name + ", " + names[index] + " with v4=" + Hex(row[0]) + " v5=" + Hex(row[1]) + " v6=" + Hex(row[2]) + " v7=" + Hex(row[3]) + " is " + Hex(actual) + ", the software conversions give " + Hex(expected));
+                    if (actual != expected) Require(false, std::string("f16 unused NaN payloads: ") + group + ", " + mode.name + ", " + names[index] + " with v4=" + Hex(row[0]) + " v5=" + Hex(row[1]) + " v6=" + Hex(row[2]) + " v7=" + Hex(row[3]) + " is " + Hex(actual) + ", the software conversions give " + Hex(expected));
                     nanResults += (IsNan(expected & 0xffffu) ? 1u : 0u) + (IsNan(expected >> 16u) ? 1u : 0u);
                 }
             }
@@ -208,36 +212,33 @@ int main() {
             if (mode.floatMode.has_value() && mode.floatMode->dx10Clamp) {
                 Require(CountOpcode(fast.spirv.Words(), spv::OpIsNan) == 0u, std::string("f16 unused NaN payloads: packed f16, ") + mode.name + " still rebuilds the NaN of an f16 input whose payload the result never uses");
             }
+            constexpr std::uint32_t rows = PackedGroups * Threads;
             for (std::uint32_t exhaustive = 0; exhaustive < Inputs; ++exhaustive) {
-                for (std::uint32_t first = 0; first < Halves; first += Threads * 2u) {
-                    for (std::uint32_t tid = 0; tid < Threads; ++tid) {
-                        for (std::uint32_t index = 0; index < Inputs; ++index) {
-                            const std::uint32_t low = index == exhaustive ? first + tid * 2u : Other();
-                            const std::uint32_t high = index == exhaustive ? first + tid * 2u + 1u : Other();
-                            Input[tid * Inputs + index] = low | (high << 16u);
-                        }
+                for (std::uint32_t tid = 0; tid < rows; ++tid) {
+                    for (std::uint32_t index = 0; index < Inputs; ++index) {
+                        const std::uint32_t low = index == exhaustive ? tid * 2u : Other();
+                        const std::uint32_t high = index == exhaustive ? tid * 2u + 1u : Other();
+                        Input[tid * Inputs + index] = low | (high << 16u);
                     }
-                    const auto fastOutput = run(fast, packedCode);
-                    const auto softwareOutput = run(software, packedCode);
-                    nanResults += compare("packed f16", mode, PackedNames, fastOutput, softwareOutput);
-                    compared += Threads * Results * 2u;
                 }
+                const auto fastOutput = run(fast, packedCode, PackedGroups);
+                const auto softwareOutput = run(software, packedCode, PackedGroups);
+                nanResults += compare("packed f16", mode, PackedNames, fastOutput, softwareOutput, rows);
+                compared += rows * Results * 2u;
             }
         }
         const std::span<const std::uint32_t> unaryCode(UnaryCode);
         for (const auto& mode : UnaryModes) {
             const auto fast = compile(unaryCode, target, mode);
             const auto software = compile(unaryCode, softwareTarget, mode);
-            for (std::uint32_t first = 0; first < Halves; first += Threads) {
-                for (std::uint32_t tid = 0; tid < Threads; ++tid) {
-                    Input[tid * Inputs] = (first + tid) | (Next() & 0xffff0000u);
-                    for (std::uint32_t index = 1; index < Inputs; ++index) Input[tid * Inputs + index] = Next();
-                }
-                const auto fastOutput = run(fast, unaryCode);
-                const auto softwareOutput = run(software, unaryCode);
-                nanResults += compare("unary f16", mode, UnaryNames, fastOutput, softwareOutput);
-                compared += Threads * Results;
+            for (std::uint32_t tid = 0; tid < Rows; ++tid) {
+                Input[tid * Inputs] = tid | (Next() & 0xffff0000u);
+                for (std::uint32_t index = 1; index < Inputs; ++index) Input[tid * Inputs + index] = Next();
             }
+            const auto fastOutput = run(fast, unaryCode, UnaryGroups);
+            const auto softwareOutput = run(software, unaryCode, UnaryGroups);
+            nanResults += compare("unary f16", mode, UnaryNames, fastOutput, softwareOutput, Rows);
+            compared += Rows * Results;
         }
         std::printf("f16 unused NaN payloads tests passed (%llu results, %llu NaN halves)\n", static_cast<unsigned long long>(compared), static_cast<unsigned long long>(nanResults));
         return 0;

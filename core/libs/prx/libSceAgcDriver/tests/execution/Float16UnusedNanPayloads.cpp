@@ -182,8 +182,8 @@ int main() {
             request.context.floatMode = mode.floatMode;
             return ShaderRecompiler::Recompile(request);
         };
-        const auto run = [&](const auto& result, std::span<const std::uint32_t> code, std::uint32_t groups) {
-            std::ranges::fill(Output, 0xdeadbeefu);
+        const auto run = [&](const auto& result, std::span<const std::uint32_t> code, std::uint32_t groups, std::uint32_t unwritten) {
+            std::ranges::fill(Output, unwritten);
             device->Dispatch(result, groups, 1, 1, {}, reinterpret_cast<std::uintptr_t>(code.data()));
             device->WaitIdle();
             return Output;
@@ -192,7 +192,6 @@ int main() {
             std::uint64_t nanResults = 0u;
             for (std::uint32_t tid = 0; tid < rows; ++tid) {
                 const std::uint32_t* row = &Input[tid * Inputs];
-                if (std::ranges::all_of(std::span(&software[tid * Results], Results), [](std::uint32_t word) { return word == 0xdeadbeefu; })) Require(false, std::string("f16 unused NaN payloads: ") + group + ", " + mode.name + ", invocation " + std::to_string(tid) + " wrote no result");
                 for (std::uint32_t index = 0; index < Results; ++index) {
                     const std::uint32_t actual = fast[tid * Results + index];
                     const std::uint32_t expected = software[tid * Results + index];
@@ -221,8 +220,8 @@ int main() {
                         Input[tid * Inputs + index] = low | (high << 16u);
                     }
                 }
-                const auto fastOutput = run(fast, packedCode, PackedGroups);
-                const auto softwareOutput = run(software, packedCode, PackedGroups);
+                const auto fastOutput = run(fast, packedCode, PackedGroups, 0xdeadbeefu);
+                const auto softwareOutput = run(software, packedCode, PackedGroups, 0xfeedfaceu);
                 nanResults += compare("packed f16", mode, PackedNames, fastOutput, softwareOutput, rows);
                 compared += rows * Results * 2u;
             }
@@ -235,8 +234,8 @@ int main() {
                 Input[tid * Inputs] = tid | (Next() & 0xffff0000u);
                 for (std::uint32_t index = 1; index < Inputs; ++index) Input[tid * Inputs + index] = Next();
             }
-            const auto fastOutput = run(fast, unaryCode, UnaryGroups);
-            const auto softwareOutput = run(software, unaryCode, UnaryGroups);
+            const auto fastOutput = run(fast, unaryCode, UnaryGroups, 0xdeadbeefu);
+            const auto softwareOutput = run(software, unaryCode, UnaryGroups, 0xfeedfaceu);
             nanResults += compare("unary f16", mode, UnaryNames, fastOutput, softwareOutput, Rows);
             compared += Rows * Results;
         }

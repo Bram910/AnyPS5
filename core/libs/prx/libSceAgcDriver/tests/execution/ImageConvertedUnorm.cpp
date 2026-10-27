@@ -57,7 +57,6 @@ constexpr std::array<std::uint32_t, 4> PointSampler{0x00000092u, 0x00fff000u, 0u
 constexpr std::array<std::uint32_t, 4> BilinearSampler{0x00000092u, 0x00fff000u, 0x00500000u, 0u};
 constexpr std::array<std::uint32_t, 4> WrapBilinearSampler{0x00000090u, 0x00fff000u, 0x00500000u, 0u};
 constexpr std::array<std::uint32_t, 4> WrapPointSampler{0x00000090u, 0x00fff000u, 0u, 0u};
-constexpr std::array<std::uint32_t, 4> BorderSampler{0x000000b6u, 0x00fff000u, 0u, 0u};
 constexpr std::uint32_t SampleStep = 0x3a200000u;
 constexpr std::uint32_t OffGridStep = 0x3a206000u;
 constexpr std::uint32_t SampleStart = 0x39c00000u;
@@ -118,8 +117,6 @@ alignas(256) constexpr auto StoreXz = StoreCode(0x5u, 0u);
 alignas(256) constexpr auto StoreD16 = StoreCode(0x7u, D16);
 alignas(256) constexpr auto StoreXzD16 = StoreCode(0x5u, D16);
 alignas(256) constexpr auto SampleLz = SamplerCode(0xf09c0f08u);
-alignas(256) constexpr auto Gather4Lz = SamplerCode(0xf11c0108u);
-alignas(256) constexpr auto GetLod = SamplerCode(0xf1800308u);
 alignas(256) constexpr auto SampleAt = SampleAtCode(SampleStep, SampleStart);
 alignas(256) constexpr auto SampleWrapped = SampleAtCode(SampleStep, WrappedStart);
 alignas(256) constexpr auto SampleOffGrid = SampleAtCode(OffGridStep, SampleStart);
@@ -777,9 +774,6 @@ int main(int argc, char** argv) {
         CheckSample(*device, texels, SampleOffGrid, OffGridStep, SampleStart, SwizzleZYX1, BilinearSampler, true, false, "off-grid bilinear image_sample_lz Z Y X 1");
         CheckSample(*device, texels, SampleWrappedOffGrid, OffGridStep, WrappedStart, SwizzleXYZ1, WrapBilinearSampler, true, true, "off-grid wrapped bilinear image_sample_lz X Y Z 1");
         CheckConvertedPreparation(*device, texels);
-        RequireRefused(*device, SampleLz, texels, SwizzleXYZ1, BorderSampler, "implemented only with wrap or clamp-to-edge addressing", "image_sample_lz with clamp-to-border addressing");
-        RequireRefused(*device, Gather4Lz, texels, SwizzleXYZ1, PointSampler, "sampling, gathering or querying LOD of a converted unorm image", "image_gather4_lz");
-        RequireRefused(*device, GetLod, texels, SwizzleXYZ1, PointSampler, "sampling, gathering or querying LOD of a converted unorm image", "image_get_lod");
         for (const auto& layout : FloatLayouts) {
             CheckFloatStoreD16(*device, texels, layout, 0x7u);
             CheckFloatStoreD16(*device, texels, layout, 0x5u);

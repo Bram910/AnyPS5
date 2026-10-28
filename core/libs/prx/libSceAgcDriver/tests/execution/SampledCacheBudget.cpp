@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Execution/include/BdaFeatures.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PerformanceOverlay.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/BufferPool.hpp"
@@ -1185,10 +1186,10 @@ int main(int argc, char** argv) {
         const bool disableStorageImageMultisample = mode == "without-storage-image-multisample";
         const bool recover = mode == "recover-sampled" || mode == "recover-storage" || mode == "recover-srgb" || mode == "recover-repack";
 #ifdef _WIN32
-        if (!memory) _putenv_s("APS5_TEXTURE_CACHE_MIB", recover ? "16" : "1");
+        if (!memory) _putenv_s("APS5_TEXTURE_CACHE_MIB", mode == "snapshot-memory" ? "512" : recover ? "16" : "1");
         if (std::getenv("APS5_TEMPLATE_AUDIT_MS") == nullptr) _putenv_s("APS5_TEMPLATE_AUDIT_MS", "250");
 #else
-        if (!memory) setenv("APS5_TEXTURE_CACHE_MIB", recover ? "16" : "1", 1);
+        if (!memory) setenv("APS5_TEXTURE_CACHE_MIB", mode == "snapshot-memory" ? "512" : recover ? "16" : "1", 1);
         setenv("APS5_TEMPLATE_AUDIT_MS", "250", 0);
 #endif
         std::unique_ptr<Device> device;
@@ -1222,6 +1223,22 @@ int main(int argc, char** argv) {
         }
         TextureDetiler detiler(context);
         context.detiler = &detiler;
+        if (mode == "snapshot-memory") {
+            std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+            constexpr std::uint32_t side = 4096;
+            constexpr std::size_t bytes = std::size_t{side} * side * sizeof(std::uint32_t);
+            WatchedSurface surface(context, bytes);
+            ClearCachedTextures(context.device);
+            const auto before = AgcDriver::ReadProcessPrivateBytes();
+            Require(before.has_value(), "snapshot memory fixture has no process-private counter");
+            auto texture = Sampled(context, surface.Address(), side);
+            Require(texture != nullptr && !texture->ViewsStorageImage(), "snapshot memory fixture did not upload its watched surface");
+            const auto after = AgcDriver::ReadProcessPrivateBytes();
+            Require(after.has_value(), "snapshot memory fixture lost its process-private counter");
+            const auto use = TextureCacheUsage();
+            std::printf("{\"surface_bytes\":%llu,\"spare_bytes\":%llu,\"sampled_bytes\":%llu,\"private_before\":%llu,\"private_after\":%llu}\n", static_cast<unsigned long long>(bytes), static_cast<unsigned long long>(use.spareBytes), static_cast<unsigned long long>(use.sampledBytes), static_cast<unsigned long long>(*before), static_cast<unsigned long long>(*after));
+            return 0;
+        }
         if (resources) {
             std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
             if (!resourceCacheTests(context, mode)) return VulkanTestSkipped;

@@ -54,10 +54,12 @@ bool g_waveLdsMemoryBarriers = false;
 bool g_deviceScopeLdsMemoryBarriers = false;
 bool g_ldsLockFences = false;
 bool g_shaderFma = false;
+bool g_spannedWave = false;
 bool g_code = false;
 
 bool Replay(const char* path) {
     auto request = ShaderRecompiler::RequestSerializer{}.Deserialize(ReadText(path));
+    if (g_spannedWave) request.request.target.spannedWaves = true;
     std::printf("%s: %zu code words, %zu user data, %zu memory regions, wave%u\n", path, request.request.shader.code.size(), request.request.context.userData.size(), request.request.context.memory.size(), request.request.context.waveSize);
     if (request.request.context.compute.has_value()) {
         const auto& compute = *request.request.context.compute;
@@ -164,6 +166,7 @@ bool Replay(const char* path) {
         }
         const auto result = ShaderRecompiler::Recompile(request.request);
         std::printf("  recompiled: %zu SPIR-V words\n", result.spirv.size());
+        std::printf("  pipeline: host subgroup %u, full subgroups %u, workgroup memory %u dwords\n", result.hostSubgroupSize, result.fullSubgroups ? 1u : 0u, result.workgroupMemoryDwords);
         if (g_spirv) {
             std::string name(path);
             name = name.substr(name.find_last_of("/\\") + 1) + ".spv";
@@ -199,7 +202,7 @@ bool Replay(const char* path) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "usage: agc_shader_replay [--dis] [--asm] [--cfg] [--mem] [--spv] [--prepare] [--materialize] [--code] [--maintenance8] [--robust2] [--wave-lds-memory-barriers] [--device-scope-lds-memory-barriers] [--lds-lock-fences] [--shader-fma] <shader.req>...\n  the driver writes shader_<address>.req files when APS5_DUMP_SHADERS is set; shader_<address>.prepare.req holds a request whose preparation failed before any resource capture, so replay it with --prepare\n");
+        std::fprintf(stderr, "usage: agc_shader_replay [--dis] [--asm] [--cfg] [--mem] [--spv] [--prepare] [--materialize] [--code] [--maintenance8] [--robust2] [--wave-lds-memory-barriers] [--device-scope-lds-memory-barriers] [--lds-lock-fences] [--shader-fma] [--spanned-wave] <shader.req>...\n  the driver writes shader_<address>.req files when APS5_DUMP_SHADERS is set; shader_<address>.prepare.req holds a request whose preparation failed before any resource capture, so replay it with --prepare\n");
         return 2;
     }
     int failures = 0;
@@ -238,6 +241,10 @@ int main(int argc, char** argv) {
         }
         if (std::string(argv[i]) == "--shader-fma") {
             g_shaderFma = true;
+            continue;
+        }
+        if (std::string(argv[i]) == "--spanned-wave") {
+            g_spannedWave = true;
             continue;
         }
         if (std::string(argv[i]) == "--mem") {

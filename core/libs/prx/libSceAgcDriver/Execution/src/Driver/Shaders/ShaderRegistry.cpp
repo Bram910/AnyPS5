@@ -18,6 +18,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <charconv>
 #include <set>
 #include <condition_variable>
 #include <cstdio>
@@ -1469,7 +1470,7 @@ public:
     static RegistrationPreparePool& Instance() {
         static auto* pool = [] {
             std::lock_guard lifecycle(Lifecycle());
-            auto* created = new RegistrationPreparePool(Closing() ? 0u : std::max(2u, std::thread::hardware_concurrency() / 2u));
+            auto* created = new RegistrationPreparePool(Closing() ? 0u : PreparationWorkers());
             PreparationSlot().store(created);
             return created;
         }();
@@ -1522,6 +1523,17 @@ public:
     }
 
 private:
+    static unsigned PreparationWorkers() {
+        const auto available = std::max(2u, std::thread::hardware_concurrency() / 2u);
+        const auto* text = std::getenv("APS5_PREPARE_THREADS");
+        if (text == nullptr) return available;
+        const auto* end = text + std::strlen(text);
+        unsigned requested = 0;
+        const auto parsed = std::from_chars(text, end, requested);
+        if (parsed.ec != std::errc{} || parsed.ptr != end || requested == 0) throw std::runtime_error("APS5_PREPARE_THREADS must be a positive integer");
+        return std::min(available, requested);
+    }
+
     static std::mutex& Lifecycle() {
         static std::mutex lifecycle;
         return lifecycle;

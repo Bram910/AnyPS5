@@ -1337,7 +1337,7 @@ configure_windows_unwind(guest_heap_small_spans_tests)
 set_target_properties(guest_heap_small_spans_tests PROPERTIES CXX_EXTENSIONS OFF)
 if(BUILD_TESTING)
     set_target_properties(guest_heap_small_spans_tests PROPERTIES EXCLUDE_FROM_ALL FALSE)
-    foreach(mode IN ITEMS default reclaim live reuse alignment threads boundaries rollback quarantine pinning phases)
+    foreach(mode IN ITEMS default reclaim live reuse alignment threads boundaries rollback quarantine pinning phases sparse growth-rollback growth-quarantine)
         add_test(NAME guest_heap_small_spans_${mode} COMMAND guest_heap_small_spans_tests ${mode})
         set_tests_properties(guest_heap_small_spans_${mode} PROPERTIES TIMEOUT 30
             ENVIRONMENT "APS5_HEAP_CACHE_MIB=0")

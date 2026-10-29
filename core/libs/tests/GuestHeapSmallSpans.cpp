@@ -273,6 +273,87 @@ void Phases() {
     std::printf("{\"requested_each_phase\":134217728,\"before\":%zu,\"after_first_free\":%zu,\"peak_system\":%zu,\"second_live_system\":%zu,\"after_second_free\":%zu,\"inuse\":%zu}\n", before.currentSystemSize, between.currentSystemSize, peak.maxSystemSize, peak.currentSystemSize, after.currentSystemSize, after.currentInuseSize);
 }
 
+void Sparse(bool expected) {
+    const auto before = Stats();
+    const std::vector<std::size_t> sizes{1, 32, 64, 96, 128, 160, 192, 224, 256, 320, 400, 500, 640, 800, 1024, 1280, 1600, 2048, 2560, 3200, 4096, 5120, 6400, 8192, 10240, 12800, 16384, 20480, 25600, 32768, 40000, 50000, 60000};
+    std::vector<unsigned char*> blocks;
+    for (std::size_t index = 0; index < sizes.size(); ++index) {
+        auto* pointer = static_cast<unsigned char*>(GuestHeap::GuestHeapAllocate_nid_postfix(sizes[index]));
+        std::memset(pointer, static_cast<int>(index + 1), sizes[index]);
+        blocks.push_back(pointer);
+    }
+    const auto live = Stats();
+    for (std::size_t index = 0; index < sizes.size(); ++index) {
+        Check(blocks[index], sizes[index], static_cast<unsigned char>(index + 1));
+        GuestHeap::GuestHeapFree_nid_postfix(blocks[index]);
+    }
+    const auto after = Stats();
+    Require(after.currentInuseSize == before.currentInuseSize, "sparse allocations remain live");
+    std::printf("{\"before\":%zu,\"live_system\":%zu,\"after_free\":%zu,\"inuse\":%zu}\n", before.currentSystemSize, live.currentSystemSize, after.currentSystemSize, after.currentInuseSize);
+    if (expected)
+        Require(live.currentSystemSize - before.currentSystemSize <= sizes.size() * 65536, "lightly used classes commit whole spans");
+}
+
+void GrowthRollback() {
+    auto blocks = Allocate(8, 4096);
+    GuestArena::GuestArenaSetAccessObserver_nid_postfix(FailCommit);
+    bool rejected = false;
+    for (unsigned attempt = 0; attempt < 256; ++attempt) {
+        const auto before = Stats();
+        try {
+            auto* pointer = static_cast<unsigned char*>(GuestHeap::GuestHeapAllocate_nid_postfix(4096));
+            std::memset(pointer, static_cast<int>(blocks.size() % 251 + 1), 4096);
+            blocks.push_back(pointer);
+        } catch (const std::bad_alloc&) {
+            rejected = true;
+            Require(Stats().currentSystemSize == before.currentSystemSize && Stats().currentInuseSize == before.currentInuseSize, "failed growth changed heap accounting");
+            break;
+        }
+    }
+    GuestArena::GuestArenaSetAccessObserver_nid_postfix(nullptr);
+    Require(rejected, "span growth did not reach the injected commit failure");
+    auto* next = static_cast<unsigned char*>(GuestHeap::GuestHeapAllocate_nid_postfix(4096));
+    std::memset(next, static_cast<int>(blocks.size() % 251 + 1), 4096);
+    blocks.push_back(next);
+    Release(blocks, 4096);
+    Require(Stats().currentInuseSize == 0, "failed span growth leaked live objects");
+}
+
+void FailGrowthInvalidation(std::uintptr_t, std::size_t bytes) {
+    if (bytes == 65536) throw std::runtime_error("injected growth rollback failure");
+}
+
+void GrowthQuarantine() {
+    auto blocks = Allocate(8, 4096);
+    const auto begin = reinterpret_cast<std::uintptr_t>(reinterpret_cast<void**>(blocks.front())[-2]);
+    GuestArena::GuestArenaSetAccessObserver_nid_postfix(FailCommit);
+    GuestAllocations::GuestAllocationsSetInvalidator_nid_postfix(FailGrowthInvalidation);
+    bool rejected = false;
+    for (unsigned attempt = 0; attempt < 256; ++attempt) {
+        const auto before = Stats();
+        try {
+            auto* pointer = static_cast<unsigned char*>(GuestHeap::GuestHeapAllocate_nid_postfix(4096));
+            std::memset(pointer, static_cast<int>(blocks.size() % 251 + 1), 4096);
+            blocks.push_back(pointer);
+        } catch (const std::runtime_error&) {
+            rejected = true;
+            Require(Stats().currentSystemSize == before.currentSystemSize && Stats().currentInuseSize == before.currentInuseSize, "rollback invalidation failure changed successful-commit accounting");
+            break;
+        }
+    }
+    GuestArena::GuestArenaSetAccessObserver_nid_postfix(nullptr);
+    GuestAllocations::GuestAllocationsSetInvalidator_nid_postfix(nullptr);
+    Require(rejected, "growth rollback failure was not propagated");
+    auto next = Allocate(1024, 4096);
+    for (const auto* pointer : next) {
+        const auto address = reinterpret_cast<std::uintptr_t>(pointer);
+        Require(address < begin || address - begin >= SpanBytes, "quarantined live span was reused");
+    }
+    Release(blocks, 4096);
+    Release(next, 4096);
+    Require(Stats().currentInuseSize == 0, "quarantining a live span leaked registered objects");
+}
+
 }
 
 int main(int argc, char** argv) {
@@ -290,6 +371,10 @@ int main(int argc, char** argv) {
         else if (mode == "quarantine") Quarantine();
         else if (mode == "pinning") Pinning();
         else if (mode == "phases") Phases();
+        else if (mode == "sparse") Sparse(true);
+        else if (mode == "sparse-probe") Sparse(false);
+        else if (mode == "growth-rollback") GrowthRollback();
+        else if (mode == "growth-quarantine") GrowthQuarantine();
         else throw std::runtime_error("unknown small-span test mode");
         std::puts("small heap span tests passed");
         return 0;

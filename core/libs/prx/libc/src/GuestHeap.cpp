@@ -33,6 +33,7 @@ constexpr std::size_t RawAlignment = 16;
 constexpr std::size_t MinimumAlignment = 32;
 constexpr std::size_t PageBytes = 0x4000;
 constexpr std::size_t SpanBytes = 1u << 20;
+constexpr std::size_t SmallCommitBytes = 64u * 1024u;
 constexpr std::size_t MaximumSmallBytes = 64u * 1024u;
 // Large blocks are rounded up to this so that freed blocks are reused by later requests of similar size.
 constexpr std::size_t LargeGranuleBytes = 64u * 1024u;
@@ -124,9 +125,11 @@ private:
         std::uint8_t* bump = nullptr;
         void* freeList = nullptr;
         std::size_t live = 0;
+        std::size_t committed = 0;
         SmallSpan* previous = nullptr;
         SmallSpan* next = nullptr;
         bool listed = false;
+        bool quarantined = false;
     };
 
     struct SizeClass {
@@ -174,30 +177,60 @@ private:
                 GuestArena::GuestArenaRelease_nid_postfix(raw, SpanBytes);
                 throw;
             }
-            try {
-                commit(raw, SpanBytes);
-            } catch (...) {
-                sizeClass.spans.erase(entry);
-                throw;
-            }
             auto& span = entry->second;
             span.begin = raw;
             span.bump = raw;
-            grow(usage().system, usage().maxSystem, SpanBytes);
             link(sizeClass, span);
         }
         auto& span = *sizeClass.available;
-        if (sizeClass.empty == &span) sizeClass.empty = nullptr;
         void* block = span.freeList;
         if (block) span.freeList = *static_cast<void**>(block);
         else {
+            commitSmall(sizeClass, span);
             block = span.bump;
             span.bump += sizeClass.bytes;
         }
+        if (sizeClass.empty == &span) sizeClass.empty = nullptr;
         ++span.live;
         if (span.freeList == nullptr && sizeClass.bytes > static_cast<std::size_t>(span.begin + SpanBytes - span.bump))
             unlink(sizeClass, span);
         return block;
+    }
+
+    static void rollbackSmall(SizeClass& sizeClass, SmallSpan& span, void* pointer, std::size_t bytes) {
+        try {
+            GuestArena::GuestArenaReset_nid_postfix(pointer, bytes);
+            GuestAllocations::GuestAllocationsInvalidate_nid_postfix(reinterpret_cast<std::uintptr_t>(pointer), bytes);
+        } catch (...) {
+            span.quarantined = true;
+            unlink(sizeClass, span);
+            if (sizeClass.empty == &span) sizeClass.empty = nullptr;
+            throw;
+        }
+    }
+
+    static void commitSmall(SizeClass& sizeClass, SmallSpan& span) {
+        const auto required = alignUp(static_cast<std::size_t>(span.bump - span.begin) + sizeClass.bytes, SmallCommitBytes);
+        if (required <= span.committed) return;
+        const auto needed = std::min(SpanBytes, std::max(required, span.committed * 2));
+        auto* pointer = span.begin + span.committed;
+        const auto bytes = needed - span.committed;
+        try {
+#ifdef _WIN32
+            GuestArena::GuestArenaCommit_nid_postfix(pointer, bytes, ReadWriteProtection, bytes);
+#else
+            GuestArena::GuestArenaSetProtection_nid_postfix(reinterpret_cast<std::uintptr_t>(pointer), bytes, ReadWriteProtection);
+#endif
+        } catch (const std::system_error& error) {
+            rollbackSmall(sizeClass, span, pointer, bytes);
+            if (outOfMemory(error)) throw std::bad_alloc();
+            throw;
+        } catch (...) {
+            rollbackSmall(sizeClass, span, pointer, bytes);
+            throw;
+        }
+        span.committed = needed;
+        grow(usage().system, usage().maxSystem, bytes);
     }
 
     static void freeSmall(SizeClass& sizeClass, void* raw) {
@@ -212,6 +245,7 @@ private:
         *static_cast<void**>(raw) = span.freeList;
         span.freeList = raw;
         --span.live;
+        if (span.quarantined) return;
         link(sizeClass, span);
         if (span.live != 0) return;
         if (sizeClass.empty == nullptr) {
@@ -220,7 +254,7 @@ private:
         }
         unlink(sizeClass, span);
         GuestArena::GuestArenaReset_nid_postfix(span.begin, SpanBytes);
-        shrink(usage().system, SpanBytes);
+        shrink(usage().system, span.committed);
         GuestAllocations::GuestAllocationsInvalidate_nid_postfix(entry->first, SpanBytes);
         GuestArena::GuestArenaRelease_nid_postfix(span.begin, SpanBytes);
         sizeClass.spans.erase(entry);

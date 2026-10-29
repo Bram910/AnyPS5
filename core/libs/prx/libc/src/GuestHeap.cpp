@@ -10,6 +10,7 @@
 #include <cstring>
 #include <limits>
 #include <list>
+#include <map>
 #include <mutex>
 #include <new>
 #include <unordered_map>
@@ -65,8 +66,8 @@ void shrink(std::atomic<std::size_t>& current, std::size_t bytes) {
 class ArenaHeap {
 public:
     static ArenaHeap& Get() {
-        static ArenaHeap heap;
-        return heap;
+        static auto* heap = new ArenaHeap;
+        return *heap;
     }
 
     void* Allocate(std::size_t total, std::size_t& blockBytes) {
@@ -84,6 +85,7 @@ public:
         auto& sizeClass = _classes[classIndex(total)];
         blockBytes = sizeClass.bytes;
         std::lock_guard lock(sizeClass.lock);
+        if (reclaimSmallSpans()) return allocateSmall(sizeClass);
         if (sizeClass.freeList) {
             void* block = sizeClass.freeList;
             sizeClass.freeList = *static_cast<void**>(block);
@@ -108,18 +110,121 @@ public:
         }
         auto& sizeClass = _classes[classIndex(blockBytes)];
         std::lock_guard lock(sizeClass.lock);
+        if (reclaimSmallSpans()) {
+            freeSmall(sizeClass, raw);
+            return;
+        }
         *static_cast<void**>(raw) = sizeClass.freeList;
         sizeClass.freeList = raw;
     }
 
 private:
+    struct SmallSpan {
+        std::uint8_t* begin = nullptr;
+        std::uint8_t* bump = nullptr;
+        void* freeList = nullptr;
+        std::size_t live = 0;
+        SmallSpan* previous = nullptr;
+        SmallSpan* next = nullptr;
+        bool listed = false;
+    };
+
     struct SizeClass {
         std::mutex lock;
         std::size_t bytes = 0;
         void* freeList = nullptr;
         std::uint8_t* bump = nullptr;
         std::uint8_t* bumpEnd = nullptr;
+        std::map<std::uintptr_t, SmallSpan> spans;
+        SmallSpan* available = nullptr;
+        SmallSpan* empty = nullptr;
     };
+
+    static bool reclaimSmallSpans() {
+        static const bool enabled = std::getenv("APS5_RECLAIM_SMALL_HEAP") != nullptr;
+        return enabled;
+    }
+
+    static void link(SizeClass& sizeClass, SmallSpan& span) {
+        if (span.listed) return;
+        span.next = sizeClass.available;
+        span.previous = nullptr;
+        if (span.next) span.next->previous = &span;
+        sizeClass.available = &span;
+        span.listed = true;
+    }
+
+    static void unlink(SizeClass& sizeClass, SmallSpan& span) {
+        if (!span.listed) return;
+        if (span.previous) span.previous->next = span.next;
+        else sizeClass.available = span.next;
+        if (span.next) span.next->previous = span.previous;
+        span.previous = nullptr;
+        span.next = nullptr;
+        span.listed = false;
+    }
+
+    static void* allocateSmall(SizeClass& sizeClass) {
+        if (sizeClass.available == nullptr) {
+            auto* raw = static_cast<std::uint8_t*>(arenaAllocate(SpanBytes, PageBytes));
+            decltype(sizeClass.spans)::iterator entry;
+            try {
+                entry = sizeClass.spans.try_emplace(reinterpret_cast<std::uintptr_t>(raw)).first;
+            } catch (...) {
+                GuestArena::GuestArenaRelease_nid_postfix(raw, SpanBytes);
+                throw;
+            }
+            try {
+                commit(raw, SpanBytes);
+            } catch (...) {
+                sizeClass.spans.erase(entry);
+                throw;
+            }
+            auto& span = entry->second;
+            span.begin = raw;
+            span.bump = raw;
+            grow(usage().system, usage().maxSystem, SpanBytes);
+            link(sizeClass, span);
+        }
+        auto& span = *sizeClass.available;
+        if (sizeClass.empty == &span) sizeClass.empty = nullptr;
+        void* block = span.freeList;
+        if (block) span.freeList = *static_cast<void**>(block);
+        else {
+            block = span.bump;
+            span.bump += sizeClass.bytes;
+        }
+        ++span.live;
+        if (span.freeList == nullptr && sizeClass.bytes > static_cast<std::size_t>(span.begin + SpanBytes - span.bump))
+            unlink(sizeClass, span);
+        return block;
+    }
+
+    static void freeSmall(SizeClass& sizeClass, void* raw) {
+        const auto address = reinterpret_cast<std::uintptr_t>(raw);
+        auto entry = sizeClass.spans.upper_bound(address);
+        if (entry == sizeClass.spans.begin()) throw std::runtime_error("guest heap span is missing");
+        --entry;
+        auto& span = entry->second;
+        if (address - entry->first >= static_cast<std::size_t>(span.bump - span.begin) ||
+            (address - entry->first) % sizeClass.bytes != 0 || span.live == 0)
+            throw std::runtime_error("guest heap span block is invalid");
+        *static_cast<void**>(raw) = span.freeList;
+        span.freeList = raw;
+        --span.live;
+        link(sizeClass, span);
+        if (span.live != 0) return;
+        if (sizeClass.empty == nullptr) {
+            sizeClass.empty = &span;
+            return;
+        }
+        unlink(sizeClass, span);
+        GuestArena::GuestArenaReset_nid_postfix(span.begin, SpanBytes);
+        shrink(usage().system, SpanBytes);
+        GuestAllocations::GuestAllocationsInvalidate_nid_postfix(entry->first, SpanBytes);
+        GuestArena::GuestArenaRelease_nid_postfix(span.begin, SpanBytes);
+        sizeClass.spans.erase(entry);
+    }
 
     static constexpr std::size_t ClassCount = 64;
 
